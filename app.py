@@ -11,8 +11,8 @@ import emoji
 import pandas as pd
 import nltk
 from nltk.corpus import stopwords
-from fuzzywuzzy import fuzz, process
-
+import altair as alt
+import urllib.parse
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
@@ -25,6 +25,7 @@ from datetime import datetime, timedelta
 
 # ---------- konfigurasi ----------
 COOKIES_FILE = "gmaps_cookies.pkl"
+COOKIE_EXPIRY_MINUTES = 60
 nltk.download("stopwords")
 stop_words = set(stopwords.words("english"))
 
@@ -41,15 +42,35 @@ report_categories = [
 
 
 # ---------- helper fungsi untuk cookies ----------
+# ---------- helper fungsi untuk cookies ----------
 def save_cookies(cookies, path=COOKIES_FILE):
+    data = {
+        "cookies": cookies,
+        "timestamp": datetime.now()
+    }
     with open(path, "wb") as f:
-        pickle.dump(cookies, f)
+        pickle.dump(data, f)
+
 
 def load_cookies(path=COOKIES_FILE):
     if not os.path.exists(path):
         return None
+
     with open(path, "rb") as f:
-        return pickle.load(f)
+        data = pickle.load(f)
+
+    # cek apakah sudah lebih dari 30 menit
+    timestamp = data.get("timestamp")
+    if timestamp and datetime.now() - timestamp > timedelta(minutes=COOKIE_EXPIRY_MINUTES):
+        try:
+            os.remove(path)
+            print("⚠️ Cookies sudah lebih dari 30 menit — file dihapus otomatis.")
+        except Exception as e:
+            print(f"⚠️ Gagal hapus cookies: {e}")
+        return None
+
+    return data.get("cookies")
+
 
 def is_cookie_file_present():
     return os.path.exists(COOKIES_FILE)
@@ -216,15 +237,14 @@ def parse_relative_date(text):
         return text
 
 # ---------- fungsi scraping yang memanfaatkan cookies ----------
-def get_low_rating_reviews(gmaps_link, max_scrolls=100):
+def get_low_rating_reviews(gmaps_link, max_scrolls=10000):
     options = Options()
     # jangan headless karena beberapa interaksi membutuhkan javascript penuh
     # kamu boleh set headless jika yakin
-    # options.add_argument("--headless=new")
+    options.add_argument("--headless=new")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--start-maximized")
     options.add_argument("--log-level=3")
 
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
@@ -234,8 +254,10 @@ def get_low_rating_reviews(gmaps_link, max_scrolls=100):
     if cookies:
         try:
             apply_cookies_to_driver(driver, cookies)
+            time.sleep(2)
+            driver.get("https://www.google.com/maps")
             # cek login
-            if not check_logged_in_via_driver(driver, timeout=5):
+            if not check_logged_in_via_driver(driver, timeout=3):
                 st.warning("cookies ditemukan tapi sepertinya tidak valid atau sudah kadaluarsa silakan login ulang")
         except Exception as e:
             st.warning(f"gagal apply cookies {e}")
@@ -254,7 +276,7 @@ def get_low_rating_reviews(gmaps_link, max_scrolls=100):
     try:
         review_tab = driver.find_element(By.XPATH, "//button[contains(., 'Reviews') or contains(., 'Ulasan')]")
         driver.execute_script("arguments[0].click();", review_tab)
-        time.sleep(4)
+        time.sleep(2)
     except Exception:
         pass
 
@@ -270,7 +292,7 @@ def get_low_rating_reviews(gmaps_link, max_scrolls=100):
                 break
             except Exception:
                 continue
-        time.sleep(3)
+        time.sleep(2)
     except Exception:
         pass
 
@@ -355,7 +377,7 @@ def get_low_rating_reviews(gmaps_link, max_scrolls=100):
     df["Place"] = place_name
     return df, place_name
 
-def auto_report_review(row, report_type="Spam"):
+def auto_report_review(row, report_type=None):
     options = Options()
     options.add_argument("--start-maximized")
     options.add_argument("--disable-blink-features=AutomationControlled")
@@ -366,18 +388,34 @@ def auto_report_review(row, report_type="Spam"):
     if cookies:
         try:
             apply_cookies_to_driver(driver, cookies)
+            time.sleep(2)
+            driver.get("https://www.google.com/maps")
             if not check_logged_in_via_driver(driver, timeout=5):
-                st.warning("cookies tidak valid — login mungkin perlu diulang")
+                st.warning("Invalid cookies — login may need to be repeated")
         except Exception as e:
-            st.warning(f"gagal apply cookies: {e}")
+            st.warning(f"Fail apply cookies: {e}")
 
     try:
-        # --- buka tempat ---
-        search_url = f"https://www.google.com/maps/search/{row['Place'].replace(' ', '+')}"
-        driver.get(search_url)
+        # jika tidak ditentukan manual, ambil hasil semantic prediction
+        if not report_type:
+            category, _ = classify_report_category(row["Review Text"])
+            report_type = category if category in report_categories else report_categories[-1]
+
+        # --- buka tempat di maps ---
+        # Prioritas: pakai link yang user input (gmaps_link)
+        try:
+            if gmaps_link and gmaps_link.strip():
+                driver.get(gmaps_link.strip())
+            else:
+                # fallback ke pencarian manual
+                search_url = f"https://www.google.com/maps/search/{row['Place'].replace(' ', '+')}"
+                driver.get(search_url)
+        except Exception as e:
+            st.warning(f"Gagal membuka link Google Maps: {e}")
+
         time.sleep(5)
 
-        # --- buka tab review ---
+        # buka tab review
         try:
             tab = driver.find_element(By.XPATH, "//button[contains(., 'Reviews') or contains(., 'Ulasan')]")
             driver.execute_script("arguments[0].click();", tab)
@@ -387,7 +425,7 @@ def auto_report_review(row, report_type="Spam"):
             driver.quit()
             return
 
-        # --- urutkan peringkat terendah ---
+        # urutkan peringkat terendah
         try:
             sort_button = driver.find_element(By.XPATH, "//button[contains(., 'Sort') or contains(., 'Urutkan')]")
             driver.execute_script("arguments[0].click();", sort_button)
@@ -403,21 +441,17 @@ def auto_report_review(row, report_type="Spam"):
         except Exception:
             pass
 
-        # --- scroll ulasan ---
+        # scroll biar semua review kebuka
         try:
             scroll_area = driver.find_element(By.XPATH, "//div[contains(@class,'m6QErb') and contains(@class,'DxyBCb')]")
-        except Exception:
-            scroll_area = None
-
-        if scroll_area:
-            for _ in range(5):
+            for _ in range(50):
                 driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight", scroll_area)
-                time.sleep(1)
-        else:
+                time.sleep(0.5)
+        except Exception:
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             time.sleep(1)
 
-        # --- cari user ---
+        # cari user target
         users = driver.find_elements(By.CSS_SELECTOR, ".d4r55")
         target = None
         for u in users:
@@ -432,138 +466,240 @@ def auto_report_review(row, report_type="Spam"):
         driver.execute_script("arguments[0].scrollIntoView({behavior:'smooth',block:'center'});", target)
         time.sleep(1)
 
-        # --- klik titik tiga ---
+        # klik titik tiga
         try:
             menu_el = target.find_element(By.XPATH, "./ancestor::div[contains(@class,'jftiEf')]//div[@class='zjA77']")
             driver.execute_script("arguments[0].click();", menu_el)
             time.sleep(2)
         except Exception:
-            st.warning("gagal klik titik tiga")
+            st.warning("failed to click the three dots")
             driver.quit()
             return
 
-        # --- klik laporkan ulasan ---
+        # klik 'Laporkan ulasan'
         js_click_report = """
         const keywords = ['Report review','Laporkan ulasan','Report','Laporkan'];
-        let clicked = false;
+        let found = false;
         document.querySelectorAll('*').forEach(el => {
-            const txt = el.innerText ? el.innerText.trim() : '';
+            const txt = (el.innerText || '').trim();
             if (keywords.some(k => txt.includes(k))) {
-                try { el.click(); clicked = true } catch(e) {}
+                try { el.click(); found = true } catch(e) {}
             }
         });
-        return clicked;
+        return found;
         """
         clicked = driver.execute_script(js_click_report)
-
         if not clicked:
-            st.warning("⚠️ tidak bisa klik 'laporkan ulasan'")
+            st.warning("⚠️ Unable to click 'report review'")
             driver.quit()
             return
 
-        st.toast(f"✅ klik 'laporkan ulasan' untuk {row['User']}")
-        time.sleep(4)
+        st.toast(f"✅ click ‘report review’ to {row['User']}")
+        time.sleep(3)
 
-      # === klik kategori report (versi sesuai struktur Coba dulu.html / Google Maps modern) ===
-  # === klik kategori report (DOM modern, lebih tangguh & adaptif) ===
+        tabs = driver.window_handles
+        if len(tabs) > 1:
+            driver.switch_to.window(tabs[-1])
+            st.info("🔄 Switch to the report popup tab")
+        else:
+            st.warning("⚠️ New tab not detected, popup may be in iframe")
+
+        # tunggu popup muncul
         try:
-            # Tunggu popup muncul
-            WebDriverWait(driver, 10).until(
+            WebDriverWait(driver, 8).until(
                 EC.presence_of_element_located(
                     (By.XPATH, "//div[@role='dialog' or contains(@class,'popup') or contains(@class,'overlay')]")
                 )
             )
-            time.sleep(1.5)
+            st.info("✅ Popup dialog terdeteksi")
+        except:
+            time.sleep(2)
 
-            target_text = report_type.lower().strip()
-            clicked_flag = False
+        # --- klik kategori sesuai struktur baru (aria-label) ---
+        
+        js_click_category = f"""
+        const target = "{report_type}".toLowerCase().trim();
 
-            js_code = f"""
-            const target = "{target_text}";
-            const selectors = ['a', 'div', 'span', 'button', '[role="option"]', '[role="radio"]', 'label'];
-            for (const sel of selectors) {{
-                const elements = document.querySelectorAll(sel);
-                for (const el of elements) {{
-                    const txt = (el.innerText || '').toLowerCase().trim();
-                    if (txt.includes(target)) {{
-                        el.scrollIntoView({{behavior:'smooth', block:'center'}});
-                        el.click();
-                        return "✅ Berhasil klik kategori: " + txt;
-                    }}
-                }}
+        function sleep(ms) {{
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }}
+
+
+        function highlight(el) {{
+        el.style.transition = "all 0.3s ease";
+        el.style.border = "3px solid red";
+        el.style.backgroundColor = "yellow";
+        el.scrollIntoView({{behavior:'smooth', block:'center'}});
+        }}
+
+        function simulateClick(el) {{
+        ['pointerdown','mousedown','mouseup','click'].forEach(evt => {{
+            el.dispatchEvent(new MouseEvent(evt, {{ bubbles: true, cancelable: true, view: window }}));
+        }});
+        }}
+
+        async function runCategoryClick(doc) {{
+        const candidates = doc.querySelectorAll('[role="button"], div[role="link"], a, div');
+
+        for (let el of candidates) {{
+            let text = (el.innerText || "").toLowerCase().trim();
+
+            // pastikan elemennya hanya mengandung satu kategori, bukan seluruh popup
+            if (text.includes(target) && text.length < 60) {{
+            highlight(el);
+            await sleep(3000); // delay 3 detik
+            simulateClick(el);
+            return "✅ Clicked category: " + text;
             }}
-            // coba klik radio input kalau ada
-            const radios = document.querySelectorAll('input[type="radio"]');
-            for (const r of radios) {{
-                const lbl = r.closest('label');
-                const txt = lbl ? (lbl.innerText || '').toLowerCase().trim() : '';
-                if (txt.includes(target)) {{
-                    lbl.scrollIntoView({{behavior:'smooth', block:'center'}});
-                    lbl.click();
-                    return "✅ Berhasil klik radio kategori: " + txt;
-                }}
+        }}
+        return null;
+        }}
+
+        async function start() {{
+        let res = await runCategoryClick(document);
+        if (res) return res;
+
+        // cek iframe jika ada
+        for (let frame of document.querySelectorAll('iframe')) {{
+            try {{
+            let doc = frame.contentDocument || frame.contentWindow.document;
+            res = await runCategoryClick(doc);
+            if (res) return res + " (inside iframe)";
+            }} catch(e) {{
+            continue;
             }}
-            return "⚠️ Tidak menemukan kategori yang cocok";
-            """
+        }}
+        return "⚠️ Category not found: " + target;
+        }}
 
-            result = driver.execute_script(js_code)
+        return await start();
+        """
 
-            if result.startswith("✅"):
-                st.success(result)
-                clicked_flag = True
-            else:
-                st.warning(result)
 
-            if not clicked_flag:
-                popup = driver.find_element(By.XPATH, "//div[@role='dialog' or contains(@class,'popup') or contains(@class,'overlay')]")
-                html = popup.get_attribute("outerHTML")
-                with open("last_report_popup.html", "w", encoding="utf-8") as f:
-                    f.write(html)
-                st.warning("⚠️ kategori tidak ditemukan — popup disimpan ke last_report_popup.html")
 
-        except Exception as e:
-            st.error(f"❌ gagal klik kategori '{report_type}': {e}")
 
-        # === klik tombol submit (lebih fleksibel) ===
+        res_cat = driver.execute_script(js_click_category)
+        if res_cat.startswith("✅"):
+            st.success(res_cat)
+        else:
+            st.warning(res_cat)
+            with open("last_report_popup_debug.html", "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+
+        # --- klik tombol submit ---
+        # --- tunggu popup muncul sebelum klik submit ---
         try:
-            time.sleep(1)
-            js_submit = """
-            const possible = ['submit','send','kirim','laporkan','report'];
-            const buttons = document.querySelectorAll('button, div[role="button"], span');
-            for (const btn of buttons) {
-                const txt = (btn.innerText || '').toLowerCase();
-                if (possible.some(k => txt.includes(k))) {
-                    btn.scrollIntoView({behavior:'smooth', block:'center'});
-                    btn.click();
-                    return "✅ Tombol submit diklik: " + txt;
+            WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located(
+                    (By.XPATH, "//div[@role='dialog' or contains(@class,'popup') or contains(@class,'overlay')]")
+                )
+            )
+            st.info("✅ Popup dialog terdeteksi, siap klik tombol submit")
+        except:
+            st.warning("⚠️ Tidak menemukan popup dialog, mencoba lanjut dalam mode halaman penuh...")
+            time.sleep(2)
+
+        # --- klik tombol submit / laporkan ---
+        js_click_submit = """
+        async function sleep(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        function highlight(el) {
+            el.style.transition = "all 0.3s ease";
+            el.style.border = "3px solid red";
+            el.style.backgroundColor = "yellow";
+            el.scrollIntoView({behavior:'smooth', block:'center'});
+        }
+
+        function simulateClick(el) {
+            ['pointerdown','mousedown','mouseup','click'].forEach(evt => {
+                el.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
+            });
+        }
+
+        async function findAndClickSubmit(root) {
+            const keywords = ['submit', 'laporkan', 'send', 'report', 'kirim', 'done', 'selesai'];
+            const selectors = [
+                'button',
+                'div[role="button"]',
+                '.VfPpkd-LgbsSe',
+                '.VfPpkd-dgl2Hf-ppHlrf-sM5MNb',
+                '.VfPpkd-LgbsSe-OWXEXe',
+                '.VfPpkd-LgbsSe-OWXEXe-nzrxxc'
+            ];
+
+            for (const sel of selectors) {
+                const els = root.querySelectorAll(sel);
+                for (const el of els) {
+                    const txt = (el.innerText || el.ariaLabel || '').toLowerCase().trim();
+                    if (keywords.some(k => txt.includes(k))) {
+                        highlight(el);
+                        await sleep(1000);
+
+                        // --- klik ala user sungguhan ---
+                        el.focus();
+                        simulateClick(el);
+
+                        // --- coba panggil form handler kalau ada ---
+                        const form = el.closest('form');
+                        if (form) {
+                            try { form.requestSubmit ? form.requestSubmit() : form.submit(); } catch(e) {}
+                        }
+
+                        // --- trigger tambahan untuk Google ripple handler ---
+                        el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+                        el.dispatchEvent(new Event('click', { bubbles: true }));
+                        
+                        await sleep(3500);
+                        return "✅ Submit button clicked successfully: " + txt;
+                    }
                 }
             }
-            return "⚠️ Tidak menemukan tombol submit di DOM";
-            """
-            res = driver.execute_script(js_submit)
 
-            if res.startswith("✅"):
-                st.success(res)
-            else:
-                st.warning(res)
-        except Exception as e:
-            st.warning(f"⚠️ gagal klik submit: {e}")
+            // recursive shadowRoot
+            for (const el of root.querySelectorAll('*')) {
+                if (el.shadowRoot) {
+                    const res = await findAndClickSubmit(el.shadowRoot);
+                    if (res) return res + " (shadowRoot)";
+                }
+            }
+
+            // cek iframe
+            for (const frame of root.querySelectorAll('iframe')) {
+                try {
+                    const doc = frame.contentDocument || frame.contentWindow.document;
+                    const res = await findAndClickSubmit(doc);
+                    if (res) return res + " (iframe)";
+                } catch(e) {}
+            }
+
+            return null;
+        }
+
+        async function start() {
+            let res = await findAndClickSubmit(document);
+            if (res) return res;
+            return "⚠️ Tombol submit tidak ditemukan";
+        }
+
+        return await start();
+        """
 
 
 
+        res_submit = driver.execute_script(js_click_submit)
+        if res_submit.startswith("✅"):
+            st.success(res_submit)
+            with open("button.html", "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+        else:
+            st.warning(res_submit)
+            with open("button.html", "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
 
-        # --- klik submit ---
-        try:
-            submit_btn = driver.find_element(By.CSS_SELECTOR, "div.VfPpkd-RLmnJb")
-            driver.execute_script("arguments[0].scrollIntoView({behavior:'smooth',block:'center'});", submit_btn)
-            time.sleep(0.5)
-            driver.execute_script("arguments[0].click();", submit_btn)
-            st.success("✅ tombol submit berhasil diklik")
-        except Exception as e:
-            st.warning(f"⚠️ gagal klik submit: {e}")
 
-        time.sleep(2)
-        st.success(f"✅ review {row['User']} sudah dilaporkan")
+        st.success(f"✅ review {row['User']} successfully reported ({report_type})")
 
     finally:
         try:
@@ -575,32 +711,32 @@ def auto_report_review(row, report_type="Spam"):
 
 # ---------- streamlit ui ----------
 # st.set_page_config(page_title="Google Maps Review Scraper", layout="wide")
-st.title("📍 Google Maps Review Scraper (login manual sekali)")
+st.title("📍 Google Maps Review Scraper")
 
 if "google_logged" not in st.session_state:
     st.session_state.google_logged = is_cookie_file_present()
 
-st.markdown("## langkah login")
+st.markdown("## Login Google Account")
 if not st.session_state.google_logged:
     st.markdown(
-        "tekan tombol di bawah untuk membuka browser chrome lalu login ke akun google kamu di jendela yang muncul setelah berhasil login cookies akan disimpan"
+        "Press the button below to open the Chrome browser, then log in to your Google account in the window that appears. After successfully logging in, cookies will be saved."
     )
-    if st.button("🔑 buka browser untuk login google"):
+    if st.button("🔑 Open Browser for login"):
         ok = start_manual_google_login(timeout=300)
         if ok:
-            st.success("login berhasil cookies tersimpan kamu bisa lanjut ke scraping")
+            st.success("login successful cookies saved")
             st.session_state.google_logged = True
         else:
-            st.error("login gagal atau timeout silakan coba lagi")
+            st.error("login failed or timeout, please try again")
 
 else:
-    st.success("kamu sudah login menggunakan cookies tersimpan")
+    st.success("You are already logged in using stored cookies.n")
 
 st.divider()
 
 # jika belum login tampilkan instruksi dan hentikan
 if not st.session_state.google_logged:
-    st.info("silakan login dulu sebelum menggunakan fitur scraping")
+    st.info("Please log in before using the scraping feature.")
     st.stop()
 
 # setelah login tampilkan fitur scraping yang sama dengan skripmu
@@ -642,37 +778,103 @@ with col1:
         if per_page != "All":
             per_page = int(per_page)
             total_pages = (len(df) - 1) // per_page + 1
-            page = st.number_input("Page:", min_value=1, max_value=total_pages, value=1, step=1)
+
+            # Inisialisasi session state untuk pagination
+            if "current_page" not in st.session_state:
+                st.session_state.current_page = 1
+
+            # Fungsi pindah halaman
+            def set_page(p):
+                st.session_state.current_page = p
+
+            # Hitung index awal dan akhir
+            page = st.session_state.current_page
             start_idx = (page - 1) * per_page
             end_idx = start_idx + per_page
             df_show = df.iloc[start_idx:end_idx]
             st.write(f"Showing {start_idx+1}–{min(end_idx, len(df))} of {len(df)} reviews.")
+
+            # Tampilkan tombol pagination
+            st.write("### 📄 Page")
+            page_cols = st.columns(min(total_pages, 10))  # Maks 10 tombol per baris
+
+            for i in range(total_pages):
+                col = page_cols[i % 10]  # ulang tiap 10 kolom
+                with col:
+                    page_num = i + 1
+                    if st.button(str(page_num), key=f"page_btn_{page_num}"):
+                        set_page(page_num)
+
         else:
             df_show = df
             st.write(f"Showing all {len(df)} reviews.")
 
+
         st.markdown("### 💬 Review Table (click 🚨 to mark)")
 
+        if st.button("🚨 REPORT ALL (Auto AI Prediction)", key="report_all"):
+            if not df_show.empty:
+                reported_count = 0
+                for idx, row in df_show.iterrows():
+                    category, score = classify_report_category(row["Review Text"])
+                    auto_report_review(row, category)  # Langsung report berdasarkan prediksi otomatis
+                    reported_count += 1
+                st.success(f"✅ Berhasil mereport otomatis {reported_count} review berdasarkan prediksi AI!")
+            else:
+                st.warning("Tidak ada review untuk direport.")
+
+
         df_show = df_show.copy()
+        # --- tampilkan tiap review ---
         for idx, row in df_show.iterrows():
             with st.container():
                 st.markdown(f"**👤 {row['User']}** — ⭐ {row['Rating']}")
                 st.markdown(f"🕒 {row['Date (Parsed)']}  |  {row['Total Reviews']}")
                 st.markdown(f"💬 {row['Review Text'] or '_(tidak ada teks)_'}")
+
                 category, score = classify_report_category(row["Review Text"])
                 st.markdown(f"**🔖 Prediksi Kategori:** `{category}` ({score}% match)")
+
                 report_choice = st.selectbox(
-                    f"📑 Pilih jenis report untuk {row['User']}",
+                    f"📑 Select the type of report for {row['User']}",
                     report_categories,
                     index=report_categories.index(category) if category in report_categories else len(report_categories) - 1,
                     key=f"choice_{idx}"
                 )
-                if st.button(f"🚨 Report Otomatis", key=f"report_{idx}"):
-                    auto_report_review(row, report_choice)
+
+                # cek apakah review ini sudah pernah direport
+                if "reported" not in st.session_state:
+                    st.session_state["reported"] = []
+
+                already_reported = any(
+                    r["User"] == row["User"] and r["Review Text"] == row["Review Text"]
+                    for r in st.session_state["reported"]
+                )
+
+                # tombol report otomatis
+                if already_reported:
+                    st.button("✅ Already Reported", key=f"reported_{idx}", disabled=True)
+                else:
+                    if st.button("🚨 Automatic Report", key=f"report_{idx}"):
+                        try:
+                            auto_report_review(row, report_choice)
+
+                            # tambahkan ke daftar reported
+                            st.session_state["reported"].append({
+                                "User": row["User"],
+                                "Review Text": row["Review Text"],
+                                "Date": row["Date (Parsed)"],
+                                "Kategori Report": report_choice
+                            })
+
+                            st.success(f"✅ Review from **{row['User']}** successfully reported and added to the list below!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed Report: {e}")
 
         if "reported" in st.session_state and st.session_state["reported"]:
             st.divider()
-            st.markdown("### 🧾 Review yang Ditandai untuk Dilaporkan")
+            st.markdown("### 🧾 Reviews that have been submitted")
             st.dataframe(pd.DataFrame(st.session_state["reported"]), use_container_width=True, hide_index=True)
 
         place_filename = st.session_state.place_name.replace(" ", "_").replace("/", "_")
@@ -686,28 +888,151 @@ with col1:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
+
 with col2:
     if gmaps_link:
         st.markdown("### 🗺️ Google Maps View")
         try:
-            import urllib.parse
             place_name = st.session_state.place_name or "Lokasi Tidak Diketahui"
             query = urllib.parse.quote_plus(place_name)
             embed_url = f"https://www.google.com/maps?q={query}&output=embed"
             st.markdown(f"📍 **{place_name}**")
             st.components.v1.iframe(embed_url, height=500)
-        except Exception as e:
-            st.warning(f"Gagal memuat peta: {e}")
 
+            # --- siapkan selenium ---
+            options = webdriver.ChromeOptions()
+            options.add_argument("--headless=new")
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            options.add_argument("--disable-gpu")
+
+            driver = None
+            try:
+                driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+                driver.get(gmaps_link)
+                time.sleep(6)
+
+                # handle redirect (maps.app.goo.gl)
+                current_url = driver.current_url
+                if "maps.app.goo.gl" in current_url:
+                    time.sleep(3)
+                    current_url = driver.current_url
+                    driver.get(current_url)
+                    time.sleep(5)
+
+                # ambil distribusi bintang dari tabel <tr class="BHOKXe">
+                rows = driver.find_elements(By.CSS_SELECTOR, "tr.BHOKXe")
+                distribusi = {}
+                for r in rows:
+                    label = r.get_attribute("aria-label")  # contoh: "5 stars, 182 reviews"
+                    if label:
+                        try:
+                            bintang = int(label.split()[0])
+                            jumlah = int(label.split(",")[1].split()[0])
+                            distribusi[bintang] = jumlah
+                        except Exception:
+                            continue
+
+            finally:
+                # pastikan driver ditutup jika dibuat
+                if driver is not None:
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass
+
+            # --- tampilkan distribusi ---
+            if distribusi:
+                st.markdown(f"### 📊 **Rating Distribution {place_name}**")
+                df_dist = (
+                    pd.Series(distribusi)
+                    .reindex([5, 4, 3, 2, 1], fill_value=0)
+                    .rename_axis("Rating")
+                    .reset_index(name="Jumlah Review")
+                )
+                st.dataframe(df_dist, use_container_width=True, hide_index=True)
+
+                # --- definisi warna berdasarkan rating ---
+                warna = {
+                    5: "#4CAF50",  # hijau
+                    4: "#8BC34A",  # hijau muda
+                    3: "#FFC107",  # kuning
+                    2: "#FF9800",  # oranye
+                    1: "#F44336",  # merah
+                }
+                df_dist["Warna"] = df_dist["Rating"].map(warna)
+
+                # --- visualisasi pakai altair ---
+                chart = (
+                    alt.Chart(df_dist)
+                    .mark_bar(cornerRadiusTopLeft=10, cornerRadiusTopRight=10)
+                    .encode(
+                        x=alt.X("Rating:O", sort="descending", axis=alt.Axis(title="Bintang")),
+                        y=alt.Y("Jumlah Review:Q", axis=alt.Axis(title="Jumlah")),
+                        color=alt.Color("Warna:N", scale=None, legend=None),
+                        tooltip=["Rating", "Jumlah Review"]
+                    )
+                    .properties(height=300)
+                )
+
+                st.altair_chart(chart, use_container_width=True)
+
+                # --- hitung rata-rata rating ---
+                total_review = df_dist["Jumlah Review"].sum()
+                if total_review > 0:
+                    avg_rating = (df_dist["Rating"] * df_dist["Jumlah Review"]).sum() / total_review
+                    st.markdown(
+                        f"<h4 style='color:#FFD700;'>⭐ Rata-rata Rating: {avg_rating:.2f}</h4>",
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.markdown("**⭐ Average Rating: {place_name} **")
+            else:
+                st.info("Tidak ada data penyebaran rating yang ditemukan.")
+
+        except Exception as e:
+            st.warning(f"Gagal memuat peta atau rating: {e}")
+
+    # --- bagian review tetap ---
     if "df_reviews" in st.session_state and not st.session_state.df_reviews.empty:
-        st.markdown("### ⭐ Ringkasan Rating")
+        import altair as alt
+        import pandas as pd
+
+        st.markdown("### 💢 Negative Review Distribution (1–2 Stars) - {place_name}")
         df = st.session_state.df_reviews
-        rating_counts = df["Rating"].value_counts().reindex([5, 4, 3, 2, 1], fill_value=0)
-        total_reviews = rating_counts.sum()
-        avg_rating = (rating_counts.index.to_numpy(dtype=float) * rating_counts.values).sum() / total_reviews if total_reviews > 0 else 0
+
+        # --- ambil hanya rating 1 dan 2 ---
+        rating_counts = (
+            df["Rating"].value_counts()
+            .reindex([2, 1], fill_value=0)
+        )
+
         summary_df = rating_counts.rename_axis("Rating").reset_index(name="Jumlah Review")
-        st.dataframe(summary_df, use_container_width=True, hide_index=True)
-        st.bar_chart(rating_counts.sort_index(ascending=True))
-        st.markdown(f"**Total Review:** {total_reviews}  \n**Rata-rata Rating:** ⭐ {avg_rating:.2f}")
+
+        # --- warna khusus ---
+        warna = {
+            2: "#FFC107",  # kuning
+            1: "#F44336",  # merah
+        }
+
+        summary_df["Warna"] = summary_df["Rating"].map(warna)
+        # --- PIE CHART ---
+        pie_chart = (
+            alt.Chart(summary_df)
+            .mark_arc(outerRadius=120, innerRadius=50)
+            .encode(
+                theta="Jumlah Review:Q",
+                color=alt.Color("Warna:N", scale=None, legend=None),
+                tooltip=["Rating", "Jumlah Review"]
+            )
+            .properties(height=350)
+        )
+
+        st.dataframe(summary_df.drop(columns=["Warna"]), use_container_width=True, hide_index=True)
+        st.altair_chart(pie_chart, use_container_width=True)
+
+        total_reviews = rating_counts.sum()
+        st.markdown(f"**Overall Rating (1–2 stars): {place_name}** {total_reviews}")
+
     else:
         st.info("Belum ada data review untuk diringkas.")
