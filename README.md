@@ -1,33 +1,31 @@
-# 🌍 Google Map Review Reporter
+# 🗺️ Google Maps Review Scraper & Reporter
 
-A **Streamlit-based web application** designed to automatically collect, analyze, and report Google Maps reviews.  
-This project uses **Selenium** to automate browser interactions (including Google login), enabling functionalities such as reporting and deep data extraction that are **not possible using public APIs alone**.
-
----
-
-## 🚀 Key Features
-
-- 🔍 **Automatic Review Scraper** — Collects all available Google Maps reviews dynamically.  
-- 🧠 **Smart Filtering** — Identify and classify reviews based on text sentiment or content.  
-- ⚙️ **Auto-Reporting System** — Automatically report inappropriate or suspicious reviews.  
-- 📊 **Interactive Dashboard** — Visualize and analyze review statistics in Streamlit.  
-- 💾 **Exportable Results** — Save review data and reports for further analysis.
+This project automates the collection and reporting of Google Maps reviews using **Selenium** and **Streamlit**.  
+It allows users to log in with a Google account, automatically scroll through reviews, analyze their content, and perform automated reporting actions.
 
 ---
 
-## 🧩 Installation & Setup
-
-### 1️⃣ Prerequisites
-Make sure you have:
-- Python **3.9 or higher**  
-- **Google Chrome** (latest version)  
-- **ChromeDriver** (automatically managed by Selenium)  
-- Stable internet connection  
-- A **Google account** (required for login process)
+## 🚀 Features
+- **Automated Google Login** using Selenium WebDriver  
+- **Full Review Scraping** with dynamic scrolling  
+- **Data Cleaning & Export** to CSV or Excel  
+- **Sentiment & Keyword Analysis** (optional extension)  
+- **Auto Reporting System** for reviews that meet specific conditions  
+- **Streamlit-based UI** for user interaction  
 
 ---
 
-### 2️⃣ Clone the Repository
+## ⚙️ Installation & Usage
+
+To set up and run the app locally, follow these steps:
+
 ```bash
+# 1️⃣ Clone the Repository
 git clone https://github.com/Daffanugraha/Google-Map-Review.git
 cd Google-Map-Review
+
+# 2️⃣ Install Dependencies
+pip install -r requirements.txt
+
+# 3️⃣ Run the Streamlit App
+streamlit run app.py
